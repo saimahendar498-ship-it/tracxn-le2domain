@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Look up a website</title>
+  <style>
+    body { margin:0; background:#f5f5f5; color:#333; font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+    .page { max-width:420px; margin:0 auto; }
+    .bar { background:#fff; text-align:center; font-weight:600; padding:12px; border-bottom:1px solid #eee; }
+    .bar a { color:#1677ff; font-size:14px; font-weight:500; text-decoration:none; }
+    .card { background:#fff; margin:12px; border-radius:8px; padding:12px; }
+    textarea { width:100%; border:0; min-height:88px; font:15px inherit; outline:none; resize:vertical; }
+    button { width:100%; height:44px; background:#1677ff; color:#fff; border:0; border-radius:8px; font-size:16px; cursor:pointer; touch-action:manipulation; transition:transform .08s ease, background .08s ease; }
+    button:active { transform:scale(0.97); background:#0958d9; }
+    button.busy { background:#0958d9; }
+    button.busy::before { content:""; display:inline-block; width:14px; height:14px; margin-right:8px; border:2px solid rgba(255,255,255,.45); border-top-color:#fff; border-radius:50%; vertical-align:-2px; animation:spin .6s linear infinite; }
+    button:disabled { cursor:default; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .msg { color:#999; font-size:13px; margin:0 12px 8px; min-height:1.2em; white-space:pre-wrap; }
+    .row { display:block; background:#fff; margin:12px; border-radius:8px; padding:12px; color:inherit; text-decoration:none; }
+    .who { font-weight:600; margin-top:2px; }
+    .sub { color:#999; font-size:12px; margin-top:2px; }
+    .open { color:#1677ff; font-size:12px; margin-top:6px; }
+    .tag { float:right; font-size:12px; color:#1677ff; }
+    .completed { color:#00b578; }
+    .failed { color:#ff3141; }
+    .track { height:8px; background:#eee; border-radius:99px; margin-top:8px; overflow:hidden; }
+    .fill { height:100%; background:#1677ff; border-radius:99px; }
+    .fill.completed { background:#00b578; }
+    .fill.failed { background:#ff3141; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="bar">Look up a website<br><a href="/domains">Websites</a></div>
+    <div class="card"><textarea id="domains" placeholder="One website per line"></textarea></div>
+    <div class="card"><button id="go">Start</button></div>
+    <p class="msg" id="msg"></p>
+    <div id="recent"></div>
+  </div>
+  <script>
+    const STEPS = [
+      "identify_prompt", "serp_post_1", "serp_poll_1", "extract_1",
+      "retry_prompt", "serp_post_2", "serp_poll_2", "extract_2",
+      "validate_prompt", "serp_post_3", "serp_poll_3", "extract_validate"
+    ];
+    const msg = document.getElementById("msg");
+    const recent = document.getElementById("recent");
+    let items = [];
+    const extra = {};
+
+    function percent(d) {
+      if (d.pipeline_status === "completed" || d.current_stage === "completed") return 100;
+      const i = Math.max(0, STEPS.indexOf(d.current_stage));
+      return Math.min(99, Math.round((i / STEPS.length) * 100 + (extra[d.domain] || 0)));
+    }
+
+    function paint() {
+      recent.innerHTML = "";
+      items.forEach(function (d) {
+        const link = document.createElement("a");
+        link.className = "row";
+        link.href = "/domain/" + encodeURIComponent(d.domain);
+        link.dataset.domain = d.domain;
+        const tag = document.createElement("div");
+        tag.className = "tag " + (d.pipeline_status || "");
+        tag.textContent = d.pipeline_status || "";
+        const name = document.createElement("div");
+        name.textContent = d.domain;
+        const who = document.createElement("div");
+        who.className = "who";
+        who.textContent = d.le_name_final || d.error || d.message || "";
+        const sub = document.createElement("div");
+        sub.className = "sub";
+        sub.textContent = [d.entity_type_final, d.outcome || d.status_1].filter(Boolean).join(" · ");
+        const track = document.createElement("div");
+        track.className = "track";
+        const fill = document.createElement("div");
+        fill.className = "fill " + (d.pipeline_status || "");
+        fill.style.width = percent(d) + "%";
+        track.append(fill);
+        const open = document.createElement("div");
+        open.className = "open";
+        open.textContent = "Details";
+        link.append(tag, name, who, sub, track, open);
+        recent.append(link);
+      });
+    }
+
+    function load() {
+      fetch("/api/v1/domains?limit=8").then(function (r) { return r.json(); }).then(function (data) {
+        const fresh = {};
+        items.forEach(function (d) { fresh[d.domain] = d.message; });
+        items = (data.items || []).map(function (d) {
+          d.message = fresh[d.domain] || "";
+          return d;
+        });
+        paint();
+      });
+    }
+
+    function roughDomain(raw) {
+      let host = String(raw || "").trim().toLowerCase();
+      host = host.replace(/^[a-z][a-z0-9+.-]*:\/\//, "");
+      host = host.split(/[/?#]/)[0].replace(/:\d+$/, "").replace(/^www\./, "").replace(/\.+$/, "");
+      return host.indexOf(".") > 0 && host.indexOf("@") < 0 ? host : "";
+    }
+
+    const go = document.getElementById("go");
+    go.onclick = function () {
+      if (go.disabled) return;
+      const domains = document.getElementById("domains").value.split(/[\s,;]+/).filter(Boolean);
+      if (!domains.length) {
+        msg.textContent = "Add at least one website.";
+        return;
+      }
+      go.disabled = true;
+      go.classList.add("busy");
+      go.textContent = "Starting…";
+      const known = {};
+      items.forEach(function (d) { known[d.domain] = d; });
+      const optimistic = [];
+      domains.forEach(function (raw) {
+        const domain = roughDomain(raw);
+        if (!domain || optimistic.indexOf(domain) >= 0) return;
+        optimistic.push(domain);
+        const prev = known[domain];
+        known[domain] = Object.assign({}, prev || {}, {
+          domain: domain,
+          pipeline_status: (prev && prev.pipeline_status) || "queued",
+          current_stage: (prev && prev.current_stage) || "identify_prompt",
+          message: prev ? "" : "Starting…"
+        });
+      });
+      if (optimistic.length) {
+        items = optimistic.map(function (domain) { return known[domain]; }).concat(items.filter(function (d) {
+          return optimistic.indexOf(d.domain) < 0;
+        }));
+        paint();
+      }
+      fetch("/api/v1/domains", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domains: domains })
+      }).then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
+        .then(function (res) {
+          if (!res.ok) {
+            msg.textContent = res.data.detail || "Could not start";
+            items = items.filter(function (d) { return d.message !== "Starting…"; });
+            paint();
+            return;
+          }
+          const added = res.data.items || [];
+          const skipped = added.filter(function (d) { return d.action === "skipped"; });
+          const picked = added.filter(function (d) { return d.action !== "skipped"; });
+          msg.textContent = skipped.length
+            ? "Skipped " + skipped.map(function (d) { return d.domain; }).join(", ")
+            : "";
+          const next = {};
+          items.forEach(function (d) { next[d.domain] = d; });
+          picked.forEach(function (d) { next[d.domain] = Object.assign(next[d.domain] || {}, d); });
+          items = picked.map(function (d) { return next[d.domain]; }).concat(items.filter(function (d) {
+            return !picked.some(function (a) { return a.domain === d.domain; }) && d.message !== "Starting…";
+          }));
+          paint();
+          load();
+        })
+        .catch(function () {
+          msg.textContent = "Could not start";
+        })
+        .finally(function () {
+          go.disabled = false;
+          go.classList.remove("busy");
+          go.textContent = "Start";
+        });
+    };
+
+    new EventSource("/api/v1/live/events").onmessage = function (ev) {
+      let data;
+      try { data = JSON.parse(ev.data); } catch (e) { return; }
+      if (data.type !== "task" || !data.task || !data.task.domain) return;
+      const row = items.find(function (d) { return d.domain === data.task.domain; });
+      if (!row) return;
+      if (row.current_stage !== data.task.stage) extra[row.domain] = 0;
+      row.current_stage = data.task.stage || row.current_stage;
+      if (data.event === "completed" && data.task.stage === "extract_validate") row.pipeline_status = "completed";
+      else if (data.event === "completed") row.pipeline_status = "running";
+      else if (data.event === "retry") row.pipeline_status = "queued";
+      else row.pipeline_status = data.task.status || row.pipeline_status;
+      if (data.event === "completed") load();
+      else paint();
+    };
+
+    setInterval(function () {
+      items.forEach(function (d) {
+        const moving = d.pipeline_status === "queued" || d.pipeline_status === "running" || d.pipeline_status === "waiting";
+        extra[d.domain] = moving ? Math.min((extra[d.domain] || 0) + 0.2, (100 / STEPS.length) - 1) : 0;
+        const link = recent.querySelector('[data-domain="' + CSS.escape(d.domain) + '"]');
+        if (!link) return;
+        const fill = link.querySelector(".fill");
+        fill.style.width = percent(d) + "%";
+        fill.className = "fill " + (d.pipeline_status || "");
+      });
+    }, 30);
+
+    load();
+  </script>
+</body>
+</html>

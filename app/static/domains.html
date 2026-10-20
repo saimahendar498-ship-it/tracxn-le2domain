@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Websites</title>
+  <style>
+    body { margin:0; background:#f5f5f5; color:#333; font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+    .page { max-width:420px; margin:0 auto; }
+    .bar { background:#fff; text-align:center; font-weight:600; padding:12px; border-bottom:1px solid #eee; }
+    .bar a { color:#1677ff; font-size:14px; font-weight:500; text-decoration:none; }
+    .row { background:#fff; margin:12px; border-radius:8px; padding:12px; }
+    .top { display:flex; justify-content:space-between; gap:8px; }
+    .sub { color:#999; font-size:12px; margin-top:2px; }
+    .tag { font-size:12px; color:#1677ff; }
+    .failed, .cancelled { color:#ff3141; }
+    .completed { color:#00b578; }
+    .waiting, .running, .queued { color:#ff8f1f; }
+    button.del { background:none; border:0; color:#ff3141; font-size:13px; padding:4px 0; cursor:pointer; touch-action:manipulation; }
+    button.del:active { opacity:.4; }
+    .track { height:8px; background:#eee; border-radius:99px; margin-top:10px; overflow:hidden; }
+    .fill { height:100%; width:0; background:#1677ff; border-radius:99px; }
+    .fill.completed { background:#00b578; }
+    .fill.failed, .fill.cancelled { background:#ff3141; }
+    .pct { color:#999; font-size:12px; margin-top:4px; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="bar">Websites<br><a href="/">Add</a></div>
+    <div id="list"></div>
+  </div>
+  <script>
+    const STEPS = [
+      "identify_prompt", "serp_post_1", "serp_poll_1", "extract_1",
+      "retry_prompt", "serp_post_2", "serp_poll_2", "extract_2",
+      "validate_prompt", "serp_post_3", "serp_poll_3", "extract_validate"
+    ];
+    const list = document.getElementById("list");
+    let items = [];
+    const extra = {};
+
+    function stepIndex(stage) {
+      const i = STEPS.indexOf(stage);
+      return i < 0 ? 0 : i;
+    }
+
+    function percent(d) {
+      if (d.pipeline_status === "completed" || d.current_stage === "completed") return 100;
+      const base = (stepIndex(d.current_stage) / STEPS.length) * 100;
+      const bump = extra[d.domain] || 0;
+      return Math.min(99, Math.round(base + bump));
+    }
+
+    function paint() {
+      list.innerHTML = "";
+      items.forEach(function (d) {
+        const pct = percent(d);
+        const row = document.createElement("div");
+        row.className = "row";
+        row.dataset.domain = d.domain;
+        const top = document.createElement("div");
+        top.className = "top";
+        const left = document.createElement("div");
+        const name = document.createElement("a");
+        name.href = "/domain/" + encodeURIComponent(d.domain);
+        name.textContent = d.domain;
+        name.style.color = "#1677ff";
+        name.style.textDecoration = "none";
+        const sub = document.createElement("div");
+        sub.className = "sub";
+        sub.textContent = [d.le_name_final, d.entity_type_final, d.outcome || d.status_1, d.error].filter(Boolean).join(" · ");
+        left.append(name, sub);
+        const right = document.createElement("div");
+        const tag = document.createElement("div");
+        tag.className = "tag " + (d.pipeline_status || "");
+        tag.textContent = d.pipeline_status || "";
+        const del = document.createElement("button");
+        del.className = "del";
+        del.textContent = "Delete";
+        del.onclick = function () {
+          if (del.disabled) return;
+          del.disabled = true;
+          del.textContent = "Deleting…";
+          fetch("/api/v1/domains/" + encodeURIComponent(d.domain), { method: "DELETE" }).then(function () {
+            items = items.filter(function (x) { return x.domain !== d.domain; });
+            paint();
+          }).catch(function () {
+            del.disabled = false;
+            del.textContent = "Delete";
+          });
+        };
+        right.append(tag, del);
+        top.append(left, right);
+        const track = document.createElement("div");
+        track.className = "track";
+        const fill = document.createElement("div");
+        fill.className = "fill " + (d.pipeline_status || "");
+        fill.style.width = pct + "%";
+        track.append(fill);
+        const label = document.createElement("div");
+        label.className = "pct";
+        label.textContent = pct + "%";
+        row.append(top, track, label);
+        list.append(row);
+      });
+    }
+
+    function tick() {
+      items.forEach(function (d) {
+        const moving = d.pipeline_status === "queued" || d.pipeline_status === "running" || d.pipeline_status === "waiting";
+        if (!moving) {
+          extra[d.domain] = 0;
+          return;
+        }
+        extra[d.domain] = Math.min((extra[d.domain] || 0) + 0.2, (100 / STEPS.length) - 1);
+      });
+      items.forEach(function (d) {
+        const row = list.querySelector('[data-domain="' + CSS.escape(d.domain) + '"]');
+        if (!row) return;
+        const pct = percent(d);
+        const fill = row.querySelector(".fill");
+        fill.style.width = pct + "%";
+        fill.className = "fill " + (d.pipeline_status || "");
+        row.querySelector(".pct").textContent = pct + "%";
+        row.querySelector(".tag").className = "tag " + (d.pipeline_status || "");
+        row.querySelector(".tag").textContent = d.pipeline_status || "";
+      });
+    }
+
+    function applyTask(task, eventName) {
+      if (!task || !task.domain) return;
+      let status = task.status || "running";
+      if (eventName === "completed" && task.stage === "extract_validate") status = "completed";
+      else if (eventName === "completed") status = "running";
+      else if (eventName === "retry") status = "queued";
+      let row = items.find(function (d) { return d.domain === task.domain; });
+      if (!row) {
+        row = { domain: task.domain };
+        items.unshift(row);
+        extra[task.domain] = 0;
+      } else if (row.current_stage !== task.stage) {
+        extra[task.domain] = 0;
+      }
+      row.pipeline_status = status;
+      if (task.stage) row.current_stage = task.stage;
+      if (status === "failed") row.error = task.error || row.error || "";
+      if (status === "completed") row.error = "";
+      paint();
+    }
+
+    fetch("/api/v1/domains").then(function (r) { return r.json(); }).then(function (data) {
+      items = data.items || [];
+      paint();
+    });
+
+    const source = new EventSource("/api/v1/live/events");
+    source.onmessage = function (ev) {
+      let data;
+      try { data = JSON.parse(ev.data); } catch (e) { return; }
+      if (data.type === "task") applyTask(data.task, data.event);
+    };
+
+    setInterval(tick, 30);
+  </script>
+</body>
+</html>

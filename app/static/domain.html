@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Website</title>
+  <style>
+    body { margin:0; background:#f5f5f5; color:#333; font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+    .page { max-width:480px; margin:0 auto; padding-bottom:24px; }
+    .bar { background:#fff; text-align:center; font-weight:600; padding:12px; border-bottom:1px solid #eee; }
+    .bar a { color:#1677ff; font-size:14px; font-weight:500; text-decoration:none; }
+    .card { background:#fff; margin:12px; border-radius:8px; padding:12px; }
+    h1 { margin:0; font-size:18px; }
+    .host { color:#999; font-size:13px; margin-top:2px; }
+    .tag { font-size:12px; color:#1677ff; }
+    .failed, .cancelled { color:#ff3141; }
+    .completed { color:#00b578; }
+    .waiting, .running, .queued { color:#ff8f1f; }
+    .track { height:8px; background:#eee; border-radius:99px; margin-top:10px; overflow:hidden; }
+    .fill { height:100%; width:0; background:#1677ff; border-radius:99px; }
+    .fill.completed { background:#00b578; }
+    .fill.failed, .fill.cancelled { background:#ff3141; }
+    .pct { color:#999; font-size:12px; margin-top:4px; }
+    .line { padding:8px 0; border-bottom:1px solid #f0f0f0; }
+    .line span { display:block; color:#999; font-size:12px; }
+    .line b { display:block; font-weight:600; margin-top:2px; }
+    h2 { margin:14px 0 4px; font-size:13px; color:#999; font-weight:500; }
+    .note { color:#666; font-size:14px; white-space:pre-wrap; margin:8px 0 0; }
+    .err { color:#ff3141; font-size:14px; white-space:pre-wrap; margin:8px 0 0; }
+    a.src { display:block; color:#1677ff; font-size:13px; margin-top:8px; text-decoration:none; overflow-wrap:anywhere; }
+    button { width:100%; height:40px; background:none; color:#ff3141; border:1px solid #ffccc7; border-radius:8px; cursor:pointer; touch-action:manipulation; transition:transform .08s ease, background .08s ease; }
+    button:active { transform:scale(0.97); background:#fff1f0; }
+    button.busy { background:#fff1f0; }
+    button:disabled { cursor:default; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="bar"><a href="/domains">Websites</a></div>
+    <div class="card">
+      <h1 id="name"></h1>
+      <div id="host" class="host"></div>
+      <div id="tag" class="tag"></div>
+      <div class="track"><div id="fill" class="fill"></div></div>
+      <div id="pct" class="pct"></div>
+    </div>
+    <div class="card" id="facts"></div>
+    <div class="card"><button id="del">Delete</button></div>
+  </div>
+  <script>
+    const STEPS = [
+      "identify_prompt", "serp_post_1", "serp_poll_1", "extract_1",
+      "retry_prompt", "serp_post_2", "serp_poll_2", "extract_2",
+      "validate_prompt", "serp_post_3", "serp_poll_3", "extract_validate"
+    ];
+    const STEP_NAME = {
+      identify_prompt: "Writing the first question",
+      serp_post_1: "Sending the first search",
+      serp_poll_1: "Waiting for the first search",
+      extract_1: "Reading the first answer",
+      retry_prompt: "Writing a follow-up",
+      serp_post_2: "Sending the follow-up",
+      serp_poll_2: "Waiting for the follow-up",
+      extract_2: "Reading the follow-up",
+      validate_prompt: "Writing the final check",
+      serp_post_3: "Sending the final check",
+      serp_poll_3: "Waiting for the final check",
+      extract_validate: "Reading the final answer",
+      completed: "Finished"
+    };
+    const domain = decodeURIComponent(location.pathname.split("/").pop());
+    let row = { domain: domain, pipeline_status: "queued", current_stage: "" };
+    let full = {};
+    let bump = 0;
+
+    function percent() {
+      if (row.pipeline_status === "completed" || row.current_stage === "completed") return 100;
+      const i = Math.max(0, STEPS.indexOf(row.current_stage));
+      return Math.min(99, Math.round((i / STEPS.length) * 100 + bump));
+    }
+
+    function text(value) { return value || "—"; }
+
+    function sources(value) {
+      return (value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    }
+
+    function linkLabel(url) {
+      try {
+        const parsed = new URL(url);
+        const path = parsed.pathname === "/" ? "" : parsed.pathname;
+        const label = parsed.hostname.replace(/^www\./, "") + path;
+        return label.length > 52 ? label.slice(0, 49) + "…" : label;
+      } catch (e) {
+        return url;
+      }
+    }
+
+    function addLine(box, label, value) {
+      const line = document.createElement("div");
+      line.className = "line";
+      const k = document.createElement("span");
+      k.textContent = label;
+      const v = document.createElement("b");
+      v.textContent = text(value);
+      line.append(k, v);
+      box.append(line);
+    }
+
+    function addLinks(box, urls) {
+      urls.forEach(function (url) {
+        const a = document.createElement("a");
+        a.className = "src";
+        a.href = url;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.textContent = linkLabel(url);
+        box.append(a);
+      });
+    }
+
+    function paint() {
+      const company = full.le_name_final || full.le_name_2 || full.le_name_1 || "";
+      document.title = company || domain;
+      document.getElementById("name").textContent = company || domain;
+      document.getElementById("host").textContent = company ? domain : "";
+      const tag = document.getElementById("tag");
+      tag.className = "tag " + (row.pipeline_status || "");
+      tag.textContent = (row.pipeline_status || "") + (row.current_stage ? " · " + (STEP_NAME[row.current_stage] || row.current_stage) : "");
+      const pct = percent();
+      const fill = document.getElementById("fill");
+      fill.style.width = pct + "%";
+      fill.className = "fill " + (row.pipeline_status || "");
+      document.getElementById("pct").textContent = pct + "%";
+
+      const type = full.entity_type_final || full.entity_type_2 || full.entity_type_1 || "";
+      const status = full.status_final || full.status_1 || "";
+      const evidence = full.evidence_final || full.evidence_2 || full.evidence_1 || "";
+      const urls = sources(full.source_urls_final || full.source_urls_2 || full.source_urls_1);
+      const box = document.getElementById("facts");
+      box.innerHTML = "";
+      addLine(box, "Company", company);
+      addLine(box, "Type", type);
+      addLine(box, "Status", status);
+      addLine(box, "Outcome", full.outcome || "");
+      if (row.error) {
+        const note = document.createElement("p");
+        note.className = "err";
+        note.textContent = row.error;
+        box.append(note);
+      }
+      if (evidence) {
+        const head = document.createElement("h2");
+        head.textContent = "Evidence";
+        box.append(head);
+        const note = document.createElement("p");
+        note.className = "note";
+        note.textContent = evidence;
+        box.append(note);
+      }
+      if (urls.length) {
+        const head = document.createElement("h2");
+        head.textContent = "Sources";
+        box.append(head);
+        addLinks(box, urls);
+      }
+      const earlier = [
+        ["First answer", full.le_name_1, full.entity_type_1, full.status_1, full.evidence_1, full.source_urls_1],
+        ["Follow-up", full.le_name_2, full.entity_type_2, full.status_2, full.evidence_2, full.source_urls_2]
+      ].filter(function (pass) {
+        return pass[1] && pass[1] !== company;
+      });
+      if (earlier.length) {
+        const head = document.createElement("h2");
+        head.textContent = "Earlier answers";
+        box.append(head);
+        earlier.forEach(function (pass) {
+          addLine(box, pass[0], [pass[1], pass[2], pass[3]].filter(Boolean).join(" · "));
+        });
+      }
+    }
+
+    function load() {
+      fetch("/api/v1/results/" + encodeURIComponent(domain)).then(function (r) {
+        if (!r.ok) throw new Error("missing");
+        return r.json();
+      }).then(function (data) {
+        row = data;
+        full = data.full_result || {};
+        if (data.result) {
+          full.le_name_final = full.le_name_final || data.result.le_name_final;
+          full.outcome = full.outcome || data.result.outcome;
+        }
+        paint();
+      }).catch(function () {
+        document.getElementById("facts").textContent = "This website is not in the list.";
+      });
+    }
+
+    const del = document.getElementById("del");
+    del.onclick = function () {
+      if (del.disabled) return;
+      if (!confirm("Delete " + domain + "?")) return;
+      del.disabled = true;
+      del.classList.add("busy");
+      del.textContent = "Deleting…";
+      fetch("/api/v1/domains/" + encodeURIComponent(domain), { method: "DELETE" }).then(function (r) {
+        if (!r.ok) throw new Error("delete");
+        location.href = "/domains";
+      }).catch(function () {
+        del.disabled = false;
+        del.classList.remove("busy");
+        del.textContent = "Delete";
+      });
+    };
+
+    const source = new EventSource("/api/v1/live/events");
+    source.onmessage = function (ev) {
+      let data;
+      try { data = JSON.parse(ev.data); } catch (e) { return; }
+      if (!data.task || data.task.domain !== domain) return;
+      if (row.current_stage !== data.task.stage) bump = 0;
+      row.current_stage = data.task.stage || row.current_stage;
+      if (data.event === "completed" && data.task.stage === "extract_validate") row.pipeline_status = "completed";
+      else if (data.event === "completed") row.pipeline_status = "running";
+      else if (data.event === "retry") row.pipeline_status = "queued";
+      else row.pipeline_status = data.task.status || row.pipeline_status;
+      if (data.task.error && row.pipeline_status === "failed") row.error = data.task.error;
+      if (data.event === "completed") load();
+      else paint();
+    };
+
+    setInterval(function () {
+      const moving = row.pipeline_status === "queued" || row.pipeline_status === "running" || row.pipeline_status === "waiting";
+      bump = moving ? Math.min(bump + 0.2, (100 / STEPS.length) - 1) : 0;
+      const pct = percent();
+      document.getElementById("fill").style.width = pct + "%";
+      document.getElementById("pct").textContent = pct + "%";
+    }, 30);
+
+    paint();
+    load();
+  </script>
+</body>
+</html>
