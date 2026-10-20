@@ -1,1 +1,1 @@
-worker: python linkedinautomation.py
+worker: python main.py
