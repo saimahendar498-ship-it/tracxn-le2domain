@@ -58,6 +58,7 @@ class Pipeline:
         llm: LLMClient,
         poll_delay: float = 8.0,
         poll_max_attempts: int = 60,
+        hide_status_final: bool = True,
     ):
         self.db = db
         self.queue = queue
@@ -65,6 +66,7 @@ class Pipeline:
         self.llm = llm
         self.poll_delay = poll_delay
         self.poll_max_attempts = poll_max_attempts
+        self.hide_status_final = hide_status_final
 
     def submit(
         self,
@@ -387,6 +389,9 @@ class Pipeline:
             """,
             [limit],
         )
+        if self.hide_status_final:
+            for row in rows:
+                row.pop("status_final", None)
         return rows
 
     def run_task(self, task: dict[str, Any]) -> dict[str, Any] | None:
@@ -576,6 +581,7 @@ class Pipeline:
             domain,
             **{
                 f"dfs_task_id_{pass_no}": posted["task_id"],
+                f"dfs_login_{pass_no}": posted.get("login"),
                 f"dfs_cost_{pass_no}": posted.get("cost"),
             },
         )
@@ -595,7 +601,11 @@ class Pipeline:
         task_id = row.get(f"dfs_task_id_{pass_no}")
         if not task_id:
             raise RuntimeError(f"missing DataForSEO task id for pass {pass_no}")
-        got = self.dfs.get_ai_mode(task_id, use_cache=use_cache)
+        got = self.dfs.get_ai_mode(
+            task_id,
+            use_cache=use_cache,
+            login=row.get(f"dfs_login_{pass_no}"),
+        )
         if got.get("pending"):
             attempts = int(payload.get("poll_attempts") or 0) + 1
             if attempts > self.poll_max_attempts:
@@ -696,10 +706,10 @@ class Pipeline:
             "status_2",
             "le_name_final",
             "entity_type_final",
-            "status_final",
             "source_urls_final",
             "evidence_final",
             "outcome",
+            *(["status_final"] if not self.hide_status_final else []),
             "dfs_task_id_1",
             "dfs_task_id_2",
             "dfs_task_id_3",

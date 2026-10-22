@@ -38,6 +38,7 @@ class AppContext:
             self.llm,
             poll_delay=settings.dfs_poll_delay_sec,
             poll_max_attempts=settings.dfs_poll_max_attempts,
+            hide_status_final=settings.hide_status_final,
         )
         self.scheduler = Scheduler(
             self.db, self.queue, self.pipeline, tick_seconds=settings.scheduler_tick_sec
@@ -186,6 +187,8 @@ def create_app(
             "SELECT * FROM domain_results WHERE domain = ?",
             [key],
         )
+        if ctx.settings.hide_status_final and payload["full_result"]:
+            payload["full_result"].pop("status_final", None)
         return _json(payload)
 
     @app.get("/api/v1/tasks")
@@ -293,16 +296,22 @@ def create_app(
             abort(404, "That schedule was not found.")
         return _json(row)
 
+    def _html(name: str) -> str:
+        response.content_type = "text/html; charset=utf-8"
+        flag = "true" if ctx.settings.hide_status_final else "false"
+        text = (STATIC_DIR / name).read_text(encoding="utf-8")
+        return text.replace("__HIDE_STATUS_FINAL__", flag)
+
     @app.get("/")
     def index():
-        return static_file("index.html", root=str(STATIC_DIR))
+        return _html("index.html")
 
     @app.get("/domains")
     def domains_page():
-        return static_file("domains.html", root=str(STATIC_DIR))
+        return _html("domains.html")
 
     @app.get("/domain/<domain>")
     def domain_page(domain):
-        return static_file("domain.html", root=str(STATIC_DIR))
+        return _html("domain.html")
 
     return app

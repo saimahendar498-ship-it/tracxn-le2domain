@@ -68,6 +68,7 @@
       extract_validate: "Reading the final answer",
       completed: "Finished"
     };
+    const hideStatusFinal = __HIDE_STATUS_FINAL__;
     const domain = decodeURIComponent(location.pathname.split("/").pop());
     let row = { domain: domain, pipeline_status: "queued", current_stage: "" };
     let full = {};
@@ -141,7 +142,7 @@
       box.innerHTML = "";
       addLine(box, "Company", company);
       addLine(box, "Type", type);
-      addLine(box, "Status", status);
+      if (!hideStatusFinal) addLine(box, "Status", status);
       addLine(box, "Outcome", full.outcome || "");
       if (row.error) {
         const note = document.createElement("p");

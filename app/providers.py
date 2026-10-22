@@ -19,6 +19,35 @@ log = logging.getLogger("anid2le.providers")
 
 DFS_READY = {20000}
 DFS_PENDING = {20100, 40601, 40602, 40603, 50000, 40102}
+# Auth, payment, and rate-limit failures belong to one account. Try the next key.
+DFS_ACCOUNT_FAIL = {40100, 40200, 40201, 40202, 40203, 40204, 40205, 40206, 40207}
+DFS_POST_OK = DFS_READY | {20100}
+
+
+def dfs_accounts(settings: Settings) -> list[tuple[str, str]]:
+    """Login/password pairs from DFS_LOGIN and DFS_PASSWORD, then DFS_API_KEYS."""
+    logins = [part.strip() for part in settings.dfs_login.split(",") if part.strip()]
+    passwords = [part.strip() for part in settings.dfs_password.split(",") if part.strip()]
+    if len(logins) != len(passwords):
+        raise RuntimeError(
+            "DFS_LOGIN and DFS_PASSWORD must list the same number of comma-separated accounts"
+        )
+    accounts = list(zip(logins, passwords))
+    for part in [item.strip() for item in settings.dfs_api_keys.split(",") if item.strip()]:
+        if ":" not in part:
+            raise RuntimeError("Each DFS_API_KEYS value must be login:password")
+        login, password = part.split(":", 1)
+        login, password = login.strip(), password.strip()
+        if login and password:
+            accounts.append((login, password))
+    unique: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for login, password in accounts:
+        if login in seen:
+            continue
+        seen.add(login)
+        unique.append((login, password))
+    return unique
 
 
 class DataForSEOClient:
@@ -26,11 +55,77 @@ class DataForSEOClient:
         self.settings = settings
         self.db = db
         self.http = http or httpx.Client(timeout=60.0)
+        self._lock = threading.Lock()
+        self._bad_logins: set[str] = set()
 
-    def _auth(self) -> tuple[str, str]:
-        if not self.settings.dfs_login or not self.settings.dfs_password:
+    def _accounts(self) -> list[tuple[str, str]]:
+        accounts = dfs_accounts(self.settings)
+        if not accounts:
             raise RuntimeError("DFS_LOGIN and DFS_PASSWORD are required")
-        return (self.settings.dfs_login, self.settings.dfs_password)
+        return accounts
+
+    def _ordered(self, preferred_login: str | None = None) -> list[tuple[str, str]]:
+        accounts = self._accounts()
+        with self._lock:
+            if self._bad_logins and self._bad_logins >= {login for login, _ in accounts}:
+                self._bad_logins.clear()
+            bad = set(self._bad_logins)
+        healthy = [item for item in accounts if item[0] not in bad]
+        failed = [item for item in accounts if item[0] in bad]
+        ordered = healthy + failed
+        if preferred_login:
+            preferred = [item for item in accounts if item[0] == preferred_login]
+            others = [item for item in ordered if item[0] != preferred_login]
+            ordered = preferred + others
+        return ordered
+
+    def _mark_bad(self, login: str) -> None:
+        with self._lock:
+            self._bad_logins.add(login)
+
+    def _call(
+        self,
+        method: str,
+        url: str,
+        *,
+        body: list | None = None,
+        preferred_login: str | None = None,
+        ok_codes: set[int],
+    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        last_error: Exception | None = None
+        accounts = self._ordered(preferred_login)
+        for index, (login, password) in enumerate(accounts, start=1):
+            try:
+                response = self.http.request(method, url, auth=(login, password), json=body)
+            except httpx.HTTPError as exc:
+                last_error = exc
+                log.warning("DataForSEO account %s failed: %s", index, exc)
+                continue
+            if response.status_code in (401, 402, 403, 429):
+                last_error = RuntimeError(f"DataForSEO HTTP {response.status_code}")
+                log.warning("DataForSEO account %s rejected (%s), trying the next", index, response.status_code)
+                self._mark_bad(login)
+                continue
+            try:
+                response.raise_for_status()
+                data = response.json()
+            except Exception as exc:
+                last_error = exc
+                log.warning("DataForSEO account %s failed: %s", index, exc)
+                continue
+            task = (data.get("tasks") or [None])[0] or {}
+            code = int(task.get("status_code") or 0)
+            if code in DFS_ACCOUNT_FAIL:
+                last_error = RuntimeError(
+                    f"DataForSEO account failed: {code} {task.get('status_message')}"
+                )
+                log.warning("DataForSEO account %s failed (%s), trying the next", index, code)
+                self._mark_bad(login)
+                continue
+            if code not in ok_codes:
+                raise RuntimeError(f"DataForSEO failed: {code} {task.get('status_message')}")
+            return data, task, login
+        raise RuntimeError(f"DataForSEO failed on every account: {last_error}")
 
     def _cache_get(self, key: str) -> dict[str, Any] | None:
         row = self.db.fetch_dict(
@@ -70,21 +165,16 @@ class DataForSEOClient:
                 "priority": self.settings.dfs_priority,
             }
         ]
-        response = self.http.post(
+        data, task, login = self._call(
+            "POST",
             "https://api.dataforseo.com/v3/serp/google/ai_mode/task_post",
-            auth=self._auth(),
-            json=payload,
+            body=payload,
+            ok_codes=DFS_POST_OK,
         )
-        response.raise_for_status()
-        data = response.json()
-        task = (data.get("tasks") or [None])[0]
-        if not task:
-            raise RuntimeError(f"DataForSEO post returned no tasks: {data}")
-        code = task.get("status_code")
-        if code not in DFS_READY | {20100}:
-            raise RuntimeError(f"DataForSEO post failed: {code} {task.get('status_message')}")
+        code = int(task.get("status_code") or 0)
         result = {
             "task_id": task.get("id"),
+            "login": login,
             "cost": data.get("cost"),
             "status_code": code,
             "raw": data,
@@ -95,23 +185,26 @@ class DataForSEOClient:
             self._cache_put(cache_key, "dataforseo_post", result)
         return result
 
-    def get_ai_mode(self, task_id: str, *, use_cache: bool = True) -> dict[str, Any]:
+    def get_ai_mode(
+        self,
+        task_id: str,
+        *,
+        use_cache: bool = True,
+        login: str | None = None,
+    ) -> dict[str, Any]:
         cache_key = "dfs:get:" + task_id
         if use_cache:
             cached = self._cache_get(cache_key)
             if cached:
                 return cached
-        response = self.http.get(
+        data, task, used_login = self._call(
+            "GET",
             f"https://api.dataforseo.com/v3/serp/google/ai_mode/task_get/advanced/{task_id}",
-            auth=self._auth(),
+            preferred_login=login,
+            ok_codes=DFS_READY | DFS_PENDING,
         )
-        response.raise_for_status()
-        data = response.json()
-        task = (data.get("tasks") or [None])[0]
-        if not task:
-            raise RuntimeError(f"DataForSEO get returned no tasks: {data}")
         code = int(task.get("status_code") or 0)
-        result = {"status_code": code, "task": task, "raw": data}
+        result = {"status_code": code, "task": task, "raw": data, "login": used_login}
         if code in DFS_READY:
             if use_cache:
                 self._cache_put(cache_key, "dataforseo_get", result)

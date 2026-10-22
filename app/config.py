@@ -26,10 +26,18 @@ def _csv_keys(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     dfs_login: str = os.getenv("DFS_LOGIN", "")
     dfs_password: str = os.getenv("DFS_PASSWORD", "")
+    dfs_api_keys: str = os.getenv("DFS_API_KEYS", "")
     nvidia_api_keys: list[str] = field(
         default_factory=lambda: _csv_keys(os.getenv("NVIDIA_API_KEYS", ""))
     )
@@ -52,6 +60,7 @@ class Settings:
     dfs_location_code: int = int(os.getenv("DFS_LOCATION_CODE", "2840"))
     dfs_language_code: str = os.getenv("DFS_LANGUAGE_CODE", "en")
     dfs_priority: int = int(os.getenv("DFS_PRIORITY", "1"))
+    hide_status_final: bool = _env_flag("HIDE_STATUS_FINAL", True)
 
 
 def get_settings() -> Settings:

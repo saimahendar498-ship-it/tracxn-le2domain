@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS domain_results (
     domain VARCHAR PRIMARY KEY,
     prompt_identify VARCHAR,
     dfs_task_id_1 VARCHAR,
+    dfs_login_1 VARCHAR,
     dfs_cost_1 DOUBLE,
     serp_text_1 VARCHAR,
     serp_markdown_1 VARCHAR,
@@ -43,6 +44,7 @@ CREATE TABLE IF NOT EXISTS domain_results (
     status_1 VARCHAR,
     prompt_retry VARCHAR,
     dfs_task_id_2 VARCHAR,
+    dfs_login_2 VARCHAR,
     dfs_cost_2 DOUBLE,
     serp_text_2 VARCHAR,
     serp_markdown_2 VARCHAR,
@@ -54,6 +56,7 @@ CREATE TABLE IF NOT EXISTS domain_results (
     status_2 VARCHAR,
     prompt_validate VARCHAR,
     dfs_task_id_3 VARCHAR,
+    dfs_login_3 VARCHAR,
     dfs_cost_3 DOUBLE,
     serp_text_3 VARCHAR,
     serp_markdown_3 VARCHAR,
@@ -144,6 +147,7 @@ class Database:
     def migrate(self) -> None:
         with self._lock:
             self._con.execute(SCHEMA_SQL)
+            self._ensure_dfs_login_columns()
             self._rebuild_events_if_needed()
             self._con.execute(INDEX_SQL)
             self._con.execute("DROP SEQUENCE IF EXISTS events_id_seq")
@@ -156,6 +160,13 @@ class Database:
                     "INSERT INTO schema_migrations VALUES (?, ?) ON CONFLICT DO NOTHING",
                     [SCHEMA_VERSION, utcnow()],
                 )
+
+    def _ensure_dfs_login_columns(self) -> None:
+        info = self._con.execute("PRAGMA table_info('domain_results')").fetchall()
+        names = {row[1] for row in info}
+        for column in ("dfs_login_1", "dfs_login_2", "dfs_login_3"):
+            if column not in names:
+                self._con.execute(f"ALTER TABLE domain_results ADD COLUMN {column} VARCHAR")
 
     def _rebuild_events_if_needed(self) -> None:
         info = self._con.execute("PRAGMA table_info('events')").fetchall()

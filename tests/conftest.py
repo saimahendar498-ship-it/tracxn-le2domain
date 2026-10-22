@@ -19,7 +19,7 @@ class FakeDFS:
         self.posts.append(keyword)
         return {"task_id": f"task-{len(self.posts)}", "cost": 0.0012}
 
-    def get_ai_mode(self, task_id: str, use_cache: bool = True):
+    def get_ai_mode(self, task_id: str, use_cache: bool = True, login: str | None = None):
         self.polls += 1
         if self.polls <= self.pending_times:
             return {"pending": True, "status_code": 40601}

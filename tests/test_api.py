@@ -34,6 +34,10 @@ def test_api_submit_get_and_dedup():
         got = client.get("/api/v1/domains/acme.in")
         assert got.status_code == 200
         client.post("/api/v1/domains", json={"domains": ["example.com"]})
+        db.execute(
+            "UPDATE domain_results SET status_final = ? WHERE domain = ?",
+            ["VALID", "acme.in"],
+        )
         task_id = got.json()["active_task_id"]
         many = client.post(
             "/api/v1/domains/lookup",
@@ -44,6 +48,9 @@ def test_api_submit_get_and_dedup():
         for row in many.json()["items"]:
             by_key[row.get("id") or row["domain"]] = row
         assert by_key["acme.in"]["found"] is True
+        assert "status_final" not in (by_key["acme.in"]["result"] or {})
+        page = client.get("/domain/acme.in")
+        assert "const hideStatusFinal = true" in page.text
         assert by_key["example.com"]["found"] is True
         assert by_key["missing.com"]["found"] is False
         assert by_key[task_id]["found"] is True
@@ -62,6 +69,33 @@ def test_api_submit_get_and_dedup():
         assert missing.status_code == 404
         gone = client.delete("/api/v1/domains/acme.in")
         assert gone.status_code == 404
+    db.close()
+
+
+def test_status_final_can_be_shown():
+    settings = Settings(
+        duckdb_path=":memory:",
+        worker_count=0,
+        nvidia_api_keys=["k"],
+        dfs_login="u",
+        dfs_password="p",
+        hide_status_final=False,
+    )
+    db = Database(":memory:")
+    app = create_app(settings=settings, db=db, start_workers=False)
+    app.ctx.pipeline.dfs = FakeDFS()
+    app.ctx.pipeline.llm = FakeLLM()
+    with _client(app) as client:
+        client.post("/api/v1/domains", json={"domains": ["acme.in"]})
+        db.execute(
+            "UPDATE domain_results SET status_final = ? WHERE domain = ?",
+            ["VALID", "acme.in"],
+        )
+        many = client.post("/api/v1/domains/lookup", json={"domains": ["acme.in"]})
+        result = many.json()["items"][0]["result"]
+        assert result["status_final"] == "VALID"
+        page = client.get("/domain/acme.in")
+        assert "const hideStatusFinal = false" in page.text
     db.close()
 
 
